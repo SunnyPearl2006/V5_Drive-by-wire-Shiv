@@ -2,6 +2,7 @@
 
 #include <Servo.h>
 #include "PID.h"
+#include "Settings.h"   // STEER_SERIAL_TEST changes the class layout
 
 /* STEER_METHOD can be STR_HBRIDGE, STR_PWM or STR_MOTOR_CONTROL*/
 
@@ -35,6 +36,17 @@ private:
   // STR_PWM: convert between wheel angle (degX10) and servo pulse (us)
   int angleToPulse(int angle_DegX10);
   int pulseToAngle(int pulse_us);
+
+#ifdef STEER_SERIAL_TEST
+  // Bench testing: steering commands typed into the serial monitor override
+  // RC/CAN steering. See pollSerialTest() for the commands.
+  void pollSerialTest();
+  bool testAngleActive = false;
+  int  testAngle_DegX10 = 0;
+  int  testPulse_us = 0;      // > 0: raw pulse override (STR_PWM only)
+  char testLine[24];
+  int  testLineLen = 0;
+#endif
 
 public:
   SteeringController();

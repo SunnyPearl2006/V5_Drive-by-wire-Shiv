@@ -56,6 +56,13 @@ Settings for the Steering */
 #define MAX_RIGHT_US 1850
 // Steering pulse widths in us for straight
 #define STRAIGHT_US 1500
+// Bench testing: uncomment to steer from the serial monitor (115200 baud on
+// serialLOG) instead of RC/CAN. Commands: a <degX10>, p <us>, t, x.
+// Leave commented out for normal driving.
+// #define STEER_SERIAL_TEST
+// Range the raw-pulse test command "p" may send: the actuator's full stroke
+#define STEER_TEST_MIN_US 1000
+#define STEER_TEST_MAX_US 2000
 // For motor controller board, time in ms to move motor
 // negative = left; positive right
 #define LEFT_ST_MS    -900

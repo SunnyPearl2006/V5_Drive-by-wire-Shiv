@@ -34,7 +34,15 @@ case STR_HBRIDGE:
   // own position control, so the PID controller is not used.
   // attach() with our limits makes writeMicroseconds() clamp to them.
     steerPID.SetControlLimits(MIN_LEFT_US, MAX_RIGHT_US);
+#ifdef STEER_SERIAL_TEST
+    // Let the raw-pulse test command reach the actuator's full 1-2 ms stroke
+    // so the Settings.h limits can be found. Angle commands are still limited
+    // to MIN_LEFT_US..MAX_RIGHT_US by angleToPulse().
+    Steer_Servo.attach(STEER_PULSE_PIN, min(MIN_LEFT_US, STEER_TEST_MIN_US),
+                                        max(MAX_RIGHT_US, STEER_TEST_MAX_US));
+#else
     Steer_Servo.attach(STEER_PULSE_PIN, MIN_LEFT_US, MAX_RIGHT_US);
+#endif
     Steer_Servo.writeMicroseconds(STRAIGHT_US);  // center the steering
     currentSteering_us = STRAIGHT_US;
     break;
@@ -74,10 +82,21 @@ int SteeringController::update(int desiredangle_DegX10, int measured_angle_DegX1
   // no 0x430 publisher, or real trike whose sensors are absent.
   if (measured_angle_DegX10 != 0) haveMeasured = true;
 
+#ifdef STEER_SERIAL_TEST
+  pollSerialTest();
+  if (testAngleActive) desiredangle_DegX10 = testAngle_DegX10;
+#endif
+
 #if (STEER_METHOD == STR_PWM)
   // The servo goes where the pulse tells it, so without feedback the best
   // estimate of the wheel angle is the last commanded angle. The open-loop
   // step model below is for the two-wire H-bridge and does not apply here.
+#ifdef STEER_SERIAL_TEST
+  if (testPulse_us > 0) {
+    currentSteering_us = testPulse_us;
+    Steer_Servo.writeMicroseconds(currentSteering_us);
+  } else
+#endif
   SteeringPID(desiredangle_DegX10);
   steerAngle_DegX10 = haveMeasured ? (float)measured_angle_DegX10
                                    : (float)pulseToAngle(currentSteering_us);
@@ -155,18 +174,20 @@ void SteeringController::SteeringPID(int input_DegX10) {
   drovRightLast = turnRight;
 
   static uint32_t lastDbg_ms = 0;
-  // Only print when the USB TX buffer has room — otherwise SerialUSB.print()
-  // blocks on a full buffer when no host is reading and stalls the control
-  // loop. availableForWrite() gating makes the print non-blocking: it is simply
+  // Goes to serialLOG (Settings.h) so it lands on the same port as the rest of
+  // the log - Serial / Programming Port by default.
+  // Only print when the TX buffer has room — otherwise print() blocks on a
+  // full buffer when no host is reading and stalls the control loop.
+  // availableForWrite() gating makes the print non-blocking: it is simply
   // skipped when there is no room.
-  if (SerialUSB && SerialUSB.availableForWrite() >= 96 && millis() - lastDbg_ms > 1000) {
+  if (serialLOG && serialLOG.availableForWrite() >= 96 && millis() - lastDbg_ms > 1000) {
     lastDbg_ms = millis();
-    SerialUSB.print("# DBW steer cmd="); SerialUSB.print(input_DegX10);
-    SerialUSB.print(" modeled=");        SerialUSB.print((int)steerAngle_DegX10);
-    SerialUSB.print(" err=");            SerialUSB.print(err);
-    SerialUSB.print(" L=");              SerialUSB.print(turnLeft  ? 1 : 0);
-    SerialUSB.print(" R=");              SerialUSB.print(turnRight ? 1 : 0);
-    SerialUSB.print(" us=");             SerialUSB.println(currentSteering_us);
+    serialLOG.print("# DBW steer cmd="); serialLOG.print(input_DegX10);
+    serialLOG.print(" modeled=");        serialLOG.print((int)steerAngle_DegX10);
+    serialLOG.print(" err=");            serialLOG.print(err);
+    serialLOG.print(" L=");              serialLOG.print(turnLeft  ? 1 : 0);
+    serialLOG.print(" R=");              serialLOG.print(turnRight ? 1 : 0);
+    serialLOG.print(" us=");             serialLOG.println(currentSteering_us);
   }
 }
 /*-----------------------------------------------------------------------------------*/
@@ -180,6 +201,72 @@ int SteeringController::angleToPulse(int angle_DegX10) {
     return STRAIGHT_US + (long)angle_DegX10 * (STRAIGHT_US - MIN_LEFT_US) / (-MIN_LEFT_DEGx10);
   return STRAIGHT_US + (long)angle_DegX10 * (MAX_RIGHT_US - STRAIGHT_US) / MAX_RIGHT_DEGx10;
 }
+/*-----------------------------------------------------------------------------------*/
+#ifdef STEER_SERIAL_TEST
+// Read steering test commands from serialLOG, one per line:
+//   a <degX10>  steer to an angle, e.g. "a -120" (left 12 deg), "a 0" (straight)
+//   p <us>      send a raw pulse width (STR_PWM only), e.g. "p 1600"
+//   t           run the center/left/right/center actuator test
+//   x           release: steering goes back to RC/CAN
+//   ?           list the commands
+// Non-blocking: characters are collected across loops until a newline.
+void SteeringController::pollSerialTest() {
+  while (serialLOG.available() > 0) {
+    char c = serialLOG.read();
+    if (c != '\n' && c != '\r') {
+      if (testLineLen < (int)sizeof(testLine) - 1) testLine[testLineLen++] = c;
+      continue;
+    }
+    if (testLineLen == 0) continue;
+    testLine[testLineLen] = '\0';
+    testLineLen = 0;
+
+    char cmd = testLine[0];
+    int value = atoi(testLine + 1);
+    serialLOG.print("# steer test: ");
+    switch (cmd) {
+    case 'a':
+      testAngle_DegX10 = constrain(value, MIN_LEFT_DEGx10, MAX_RIGHT_DEGx10);
+      testAngleActive = true;
+      testPulse_us = 0;
+      serialLOG.print("angle ");
+      serialLOG.print(testAngle_DegX10);
+#if (STEER_METHOD == STR_PWM)
+      serialLOG.print(" -> ");
+      serialLOG.print(angleToPulse(testAngle_DegX10));
+      serialLOG.print(" us");
+#endif
+      serialLOG.println();
+      break;
+    case 'p':
+#if (STEER_METHOD == STR_PWM)
+      testPulse_us = constrain(value, STEER_TEST_MIN_US, STEER_TEST_MAX_US);
+      testAngleActive = false;
+      serialLOG.print("pulse ");
+      serialLOG.print(testPulse_us);
+      serialLOG.println(" us");
+#else
+      serialLOG.println("p needs STEER_METHOD STR_PWM");
+#endif
+      break;
+    case 't':
+      serialLOG.println("running actuator test");
+      test();
+      testPulse_us = 0;
+      testAngleActive = true;      // hold straight after the sweep
+      testAngle_DegX10 = 0;
+      break;
+    case 'x':
+      testAngleActive = false;
+      testPulse_us = 0;
+      serialLOG.println("released to RC/CAN");
+      break;
+    default:
+      serialLOG.println("commands: a <degX10>, p <us>, t, x");
+    }
+  }
+}
+#endif
 /*-----------------------------------------------------------------------------------*/
 // Inverse of angleToPulse.
 int SteeringController::pulseToAngle(int pulse_us) {
